@@ -19,18 +19,13 @@ struct qentry
 	int tid;
 	ll machineadd;
 	ll globalcount;
-	
+	int read_write;
 };
 
-/*msg code 
-	getX - 0
-	get  - 1
-	putX - 2
 
-*/
 enum msg
 {
-	getX,get,putX,put,inv,invack
+	getX,getmsg,putX,put,inv,invack
 	
 };
 struct outentry
@@ -38,56 +33,46 @@ struct outentry
 	int tid;
 	ll machineadd;
 	ll globalcount;
+	int rw;
 	enum msg dir_msg;
+};
+
+struct dir_entry
+{
+	bool dirty;
+	ll address;
+	bitset<8> sharer;
 };
 
 //32 KB, 8-way, 64-byte block size, LRU
 
-vector<vector<block>> l10(64, vector<block>(8,{false,-1,false}));
-vector<vector<block>> l11(64, vector<block>(8,{false,-1,false}));
-vector<vector<block>> l12(64, vector<block>(8,{false,-1,false}));
-vector<vector<block>> l13(64, vector<block>(8,{false,-1,false}));
-vector<vector<block>> l14(64, vector<block>(8,{false,-1,false}));
-vector<vector<block>> l15(64, vector<block>(8,{false,-1,false}));
-vector<vector<block>> l16(64, vector<block>(8,{false,-1,false}));
-vector<vector<block>> l17(64, vector<block>(8,{false,-1,false}));
+vector<vector<vector<block>>> l1(8,vector<vector<block>>(64, vector<block>(8,{false,-1,false})));
 
 //4 MB, 16-way, 64-byte block size, LRU,
 
-vector<vector<block>> l30(2048, vector<block>(16,{false,-1,false}));
-vector<vector<block>> l31(2048, vector<block>(16,{false,-1,false}));
-vector<vector<block>> l32(2048, vector<block>(16,{false,-1,false}));
-vector<vector<block>> l33(2048, vector<block>(16,{false,-1,false}));
-vector<vector<block>> l34(2048, vector<block>(16,{false,-1,false}));
-vector<vector<block>> l35(2048, vector<block>(16,{false,-1,false}));
-vector<vector<block>> l36(2048, vector<block>(16,{false,-1,false}));
-vector<vector<block>> l37(2048, vector<block>(16,{false,-1,false}));
-//vector<list<ll>> l2lru(1024);
-//vector<list<ll>> l3lru(2048);
-//ll l2hit,l2miss, l3hit,l3miss;
+vector<vector<vector<dir_entry>>> l2(8,vector<vector<dir_entry>>(2048, vector<dir_entry>(16,{false,0,0})));
+
+//----------------LRU FOR L1 AND L2 CACHES-----------------------
+
+std::vector<vector<list<ll>> > lru_l1(8, vector<list<ll>>(64));
+std::vector<vector<list<ll>> > lru_l2(8, vector<list<ll>>(2048));
+
+//----------------------DIRECTORY FOR L2 CACHE BANKS---------------------
+
+
 
 //variables 
 ll sim_cycle, l1_access[8], l1_miss[8], l2_miss[8], global_consumed=-1;
 
 //input queue for l1 cache
 vector<list<qentry>> l1_in_queue(8);
-/*list<qentry> q1;
-list<qentry> q2;
-list<qentry> q3;
-list<qentry> q4;
-list<qentry> q5;
-list<qentry> q6;
-list<qentry> q7;
-*/
-// lru for l1 
-std::vector<vector<list<ll>> > lru_l1(8, vector<list<ll>>(64));
-std::vector<vector<list<ll>> > lru_l2(8, vector<list<ll>>(2048));
- 
- // output queue for l1 caches
+
+
+ // other input queue for l1 caches
 std::vector<list<outentry>> l1_out_queue(8);
 
 //output queue for l2 caches
-std::vector<list<outentry>> l2_out_queue(8);
+//std::vector<list<outentry>> l2_out_queue(8);
 
 //input queue for l2 caches
 std::vector<list<outentry>> l2_in_queue(8);
@@ -96,34 +81,102 @@ std::vector<list<outentry>> l2_in_queue(8);
 std::vector<list<outentry>> miss_buff_l1(8);
 
 bool compareInterval(qentry i1, qentry i2){
-	return(i1.machineadd < i2.machineadd);
+	return(i1.tid < i2.tid);
 }
 
-//------------------***********--------------------------------
-// core 0
-bool hit_miss_l10(ll address) 
+//------------------HIT MISS FUNCTION OF ALL THE CACHES--------------------------------
+
+bool hit_miss_l1(ll address, int tid) 
 {
-	l1_access[0]++;	
+	l1_access[tid]++;	
 	address = address >>6;
     int set  =  address % 64;
     for (int i=0;i<8;i++) 
     {
-        if((l10[set][i].address == address) && (l10[set][i].present))
+        if((l1[tid][set][i].address == address) && (l1[tid][set][i].present))
             return true;
     }
     return false;
 }
-//core 1
+//------------------HIT MISS L2---------------------------------------------
+
+bool hit_miss_l2(ll address, int tid) 
+{
+	//l1_access[tid]++;	
+	address = address >>6;
+    int set  =  address % 2048;
+    for (int i=0;i<16;i++) 
+    {
+        if((l2[tid][set][i].address == address) && (l2[tid][set][i].dirty))
+            return true;
+    }
+    return false;
+}
+
+//----------------------UPDATE L1 LRU ON L1 HIT OF ALL CACHES------------------
+
+void update_on_hit(ll address, int tid) 
+{
+	address = address>>6;
+    int set  =  address % 64;
+    // Move the block to the top of LRU set
+    lru_l1[tid][set].remove(address);
+    lru_l1[tid][set].push_front(address);
+    //return;
+}
 
 
-
-
-//----------------------****************------------------
+//-------------------FIND BANK ID---------------------------
 
 ll find_bank(ll address){
 	address = address>>6;
 	ll bank_id = address & 0x7;
 	return bank_id;
+}
+
+//---------------------CURRENT CYCLE FUNCTION FOR L1--------------
+
+void current_cycle(ll machineadd, ll globalcount, int tid, int read_write){
+
+
+	if(! hit_miss_l1(machineadd, tid)){ // if miss in l1 cache.
+      					l1_miss[tid]++;
+      					ll bid = find_bank(machineadd);
+
+      					cout<<bid<<"<--bank id \n";
+      					//put this request in respective l2 cache bank queue according to read write pass message.
+      					//cout<<this_cycle[j].read_write<<"read write\n";
+      					if(read_write == 0){
+      						// this means its a read miss --> send a get request to respective home l2 cache;
+      						cout<<"read\n";
+      						outentry send;
+      						send.tid = tid;
+      						send.machineadd = machineadd;
+      						send.globalcount = globalcount;
+      						send.dir_msg  = getmsg;
+      						send.rw = read_write;
+      						l2_in_queue[bid].push_back(send);
+
+      					}else{
+      						//this is a write miss -> send a getx to ...
+      						outentry send;
+      						send.tid = tid;
+      						send.machineadd = machineadd;
+      						send.globalcount = globalcount;
+      						send.dir_msg  = getX;
+      						send.rw = read_write;
+      						l2_in_queue[bid].push_back(send);
+
+      					}
+
+      				}else{
+      					//if hit in l1 cache;
+      					//1. update l1 lru
+      					update_on_hit(machineadd, tid);
+
+      				}
+
+
 }
 
 
@@ -147,6 +200,7 @@ int main(int argc, char const *argv[])
 			entry.tid = tid;
 			entry.machineadd = machine_add;
 			entry.globalcount = gc;
+			entry.read_write = rw;
 			if(tid == 0){
 				//q0.tid = tid;
 				l1_in_queue[0].push_back(entry);
@@ -163,50 +217,161 @@ int main(int argc, char const *argv[])
 	
       	}
       	fclose(fp);
-      	//cout<<q0.size()<<endl<<q1.size()<<endl<<q2.size()<<endl<<q3.size()<<endl<<q4.size()<<endl<<q5.size()<<endl<<q6.size()<<endl<<q7.size()<<endl;
+      	
 
       	while(!l1_in_queue[0].empty() || !l1_in_queue[1].empty()|| !l1_in_queue[2].empty() || !l1_in_queue[3].empty()|| !l1_in_queue[4].empty() || !l1_in_queue[5].empty()||!l1_in_queue[6].empty() || !l1_in_queue[7].empty()){
       		sim_cycle++;
       		qentry temp_madd[8] = {0};
+      		qentry tempentry;
       		for(int i=0;i<8;i++){
-      			qentry tempentry;
+      			
       			tempentry = l1_in_queue[i].front();
-      			l1_in_queue[i].pop_front(); // update ***********
+      			l1_in_queue[i].pop_front(); 
       			temp_madd[i] = tempentry;
+      			
       		}
+
+      		// sort the temp_madd according to global count
       		sort(temp_madd,temp_madd+8, compareInterval);
+
+
+      		//for debug
+      		for(int i=0;i<8;i++) cout<<temp_madd[i].machineadd<<endl<<temp_madd[i].globalcount<<endl;
       		
       		qentry this_cycle[8];
       		//ll mini_count;
       		int i=0;
       		while(i<8 && (temp_madd[i].globalcount == global_consumed+1)){
+      			cout<<"inside loop 1\n";
       			this_cycle[i] = temp_madd[i];
       			global_consumed += 1;
       			i++;
-      		}//----------------------------
+      		}
+      		int i1 =i;
 
+      		while(i != 8){
+
+      			int tid = temp_madd[i].tid;
+      			// return to respective input queue
+      			l1_in_queue[i].push_front(temp_madd[i]);
+      			i++;
+
+      		}
 
       		int j=0;
-      		while(i>0){
+      		while(i1>0){		// not terminating loop, update value of i and j;
+      			cout<<"inside loop 2\n";	
       			int tid;
       			tid = this_cycle[j].tid;
       			if(tid == 0){
-      				if(! hit_miss_l10(this_cycle[j].machineadd)){
-      					l1_miss[0]++;
-      					ll bid = find_bank(this_cycle[j].machineadd);
-      					//put this request in respective l2 cache bank queue according to read write pass message.
-      				}
+      				current_cycle(this_cycle[j].machineadd, this_cycle[j].globalcount, this_cycle[j].tid, this_cycle[j].read_write);
       			} 
-      			else if (tid == 1) //hit_miss_l11(this_cycle[j].machineadd);
-      			else if (tid == 2) //hit_miss_l12(this_cycle[j].machineadd);
-      			else if (tid == 3) //hit_miss_l13(this_cycle[j].machineadd);
-      			else if (tid == 4) //hit_miss_l14(this_cycle[j].machineadd);
-      			else if (tid == 5) //hit_miss_l15(this_cycle[j].machineadd);
-      			else if (tid == 6) //hit_miss_l16(this_cycle[j].machineadd);
-      			else if (tid == 7) //hit_miss_l17(this_cycle[j].machineadd);
-      		}//-----------------------------------
+      			else if (tid == 1){
+      				current_cycle(this_cycle[j].machineadd, this_cycle[j].globalcount, this_cycle[j].tid, this_cycle[j].read_write);
+      			} 
+      			else if (tid == 2){
+      				current_cycle(this_cycle[j].machineadd, this_cycle[j].globalcount, this_cycle[j].tid, this_cycle[j].read_write);
+      			} 
+      			else if (tid == 3){
+      				current_cycle(this_cycle[j].machineadd, this_cycle[j].globalcount, this_cycle[j].tid, this_cycle[j].read_write);
+      			} 
+      			else if (tid == 4){
+      				current_cycle(this_cycle[j].machineadd, this_cycle[j].globalcount, this_cycle[j].tid, this_cycle[j].read_write);
+      			} 
+      			else if (tid == 5) {
+      				current_cycle(this_cycle[j].machineadd, this_cycle[j].globalcount, this_cycle[j].tid, this_cycle[j].read_write);
+      			}
+      			else if (tid == 6) {
+      				current_cycle(this_cycle[j].machineadd, this_cycle[j].globalcount, this_cycle[j].tid, this_cycle[j].read_write);
+      			}
+      			else if (tid == 7){
+      				current_cycle(this_cycle[j].machineadd, this_cycle[j].globalcount, this_cycle[j].tid, this_cycle[j].read_write);
+      			}
+      	
+      				j++;i1--;
+      		}
 
-      		//process output queue of each l2 cache.
+      		//for debug
+      		//cout<<l2_in_queue[7].front().machineadd<<endl;
+      		//cout<<l2_in_queue[7].front().dir_msg<<endl;
+      		//cout<<l2_in_queue[7].front().tid<<endl;
+      		//cout<<l2_in_queue[7].front().globalcount<<endl;
+
+
+      		// process other queue of l1 (if not empty) && now process l2 input queue (if not empty) 
+      		outentry ohterinput[8], l2input[8];
+      		int k=0, size_otherinput=0,size_l2input=0;
+      		while(k<8){
+      			if (! l1_out_queue[k].empty()){
+      				ohterinput[k] = l1_out_queue[k].front();
+      				//size_otherinput++;
+      				// do this later
+      				l1_out_queue[k].pop_front();
+      			}
+      			if(! l2_in_queue[k].empty()){
+      				l2input[k] = l2_in_queue[k].front();
+      				//size_l2input++;
+      				//process this entry from l2 input queue and then remove it 
+      				// check if dirty is set or not
+      				if (hit_miss_l2(l2input[k].machineadd, l2input[k].tid)){
+      					//dirty bit is set
+      					if(l2input[k].rw == 0){
+      						//read
+      						// send get request to current owner and change bit vector--> make both k and owner sharers of blk;
+
+
+
+      					}else{
+      						//write
+      						//send getx to current owner and set bitvector such that k is new owner;
+
+
+
+      					}
+      				}else{
+      					//dirty bit is not set
+      					if(l2input[k].rw == 0){
+      						//read
+      						//send put and set bit corresponding to k(means sharer) in bitvector
+
+
+      					}else{
+      						//write
+      						//send putx with no. of acks to be expected;
+      						//find sharer from bit vector and send them invalidation; make bitvector  = k;(owner)
+
+
+
+      					}
+
+      				}
+
+      				l2_in_queue[k].pop_front();
+      			}
+      			k++;
+      		}
+
+      		/*int u=0;
+      		while(size_otherinput--){
+      			// process one by one;
+
+      		}
+
+      		int n=0;
+      		while(size_l2input--){
+      			//process one by one
+      			outentry l2process;
+      			l2process.machineadd = l2input[k].machineadd;
+      			l2process.dir_msg = l2input[k].dir_msg;
+      			if(l2process.dir_msg == getmsg && )
+      		}*/
+
+      		
+
+      	
+
+
+
 
       		
       		break;
