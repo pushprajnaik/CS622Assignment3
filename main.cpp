@@ -40,6 +40,7 @@ struct outentry
 struct dir_entry
 {
 	bool dirty;
+	bool present;
 	ll address;
 	bitset<8> sharer;
 };
@@ -50,7 +51,7 @@ vector<vector<vector<block>>> l1(8,vector<vector<block>>(64, vector<block>(8,{fa
 
 //4 MB, 16-way, 64-byte block size, LRU,
 
-vector<vector<vector<dir_entry>>> l2(8,vector<vector<dir_entry>>(2048, vector<dir_entry>(16,{false,0,0})));
+vector<vector<vector<dir_entry>>> l2(8,vector<vector<dir_entry>>(2048, vector<dir_entry>(16,{false,false,0,0})));
 
 //----------------LRU FOR L1 AND L2 CACHES-----------------------
 
@@ -100,17 +101,17 @@ bool hit_miss_l1(ll address, int tid)
 }
 //------------------HIT MISS L2---------------------------------------------
 
-bool hit_miss_l2(ll address, int tid) 
+int hit_miss_l2(ll address, int tid) 
 {
 	//l1_access[tid]++;	
 	address = address >>6;
     int set  =  address % 2048;
     for (int i=0;i<16;i++) 
     {
-        if((l2[tid][set][i].address == address) && (l2[tid][set][i].dirty))
-            return true;
+        if((l2[tid][set][i].address == address) && (l2[tid][set][i].present))
+            return l2[tid][set][i].dirty;
     }
-    return false;
+    return -1;
 }
 
 //----------------------UPDATE L1 LRU ON L1 HIT OF ALL CACHES------------------
@@ -133,6 +134,35 @@ ll find_bank(ll address){
 	ll bank_id = address & 0x7;
 	return bank_id;
 }
+//---------------------SETTING SHARER---------------------------
+void set_sharer(int k, ll address, int tid){
+	address = address>>6;
+	int set = address % 2048;
+	int i;
+	for(i=0;i<16;i++){
+		if(((l2[k][set][i].address == address) && l2[k][set][i].present)){
+			l2[k][set][i].sharer.set(tid);
+			break;
+		}
+	}
+	//cout<<l2[k][set][i].sharer<<endl;
+}
+
+//------------------GET SHARER---------------------------------
+bitset<8> get_sharer(int k, ll address){
+	address = address>>6;
+	int set = address % 2048;
+	int i;
+	for(i=0;i<16;i++){
+		if(((l2[k][set][i].address == address) && l2[k][set][i].present)){
+			return l2[k][set][i].sharer;
+		
+		}
+	}
+	abort();
+	
+}
+
 
 //---------------------CURRENT CYCLE FUNCTION FOR L1--------------
 
@@ -178,6 +208,93 @@ void current_cycle(ll machineadd, ll globalcount, int tid, int read_write){
 
 
 }
+//----------------------ADD BLOCK TO L2 CACHE ON L2 MISS----------------------
+ll add_block_l2(ll address, int k) 
+{	
+	address = address>>6;
+    int set  =  address % 2048;
+    // Check if a way is free in the set
+    
+    for (int i=0;i<16;i++) 
+    {
+        if (l2[k][set][i].present) 
+        	continue;
+        // Found an empty slot
+        l2[k][set][i].present = true;
+        l2[k][set][i].address = address;
+        lru_l2[k][set].push_front(address);
+        cout<<"found empty slot in l2 and added\n";
+        return 0;
+    }
+    // All 'ways' in the set are valid, evict one
+    ll evict_block = lru_l2[k][set].back();
+    lru_l2[k][set].pop_back();
+
+    for (int i=0;i<16;i++) 
+    {
+        if (l2[k][set][i].address != evict_block)
+        	continue;
+        // Found the block to be evicted
+        l2[k][set][i].address = address;
+        lru_l2[k][set].push_front(address);
+        return evict_block;
+    }
+    abort(); 
+
+}
+//----------------------ADD BLOCK L1---------------------------------------
+ll add_block_l1(ll address, int tid) 
+{
+	address = address>>6;
+    int set  =  address % 64;
+    // Check if a way is free in the set
+    for (int i=0;i<8;i++) 
+    {
+        if (l1[tid][set][i].present) 
+        	continue;
+        // Found an empty slot
+        
+        l1[tid][set][i].present = true;
+        l1[tid][set][i].address = address;
+        lru_l1[tid][set].push_front(address);
+        cout<<"found empty slot in l1 and added\n";
+        return 0;
+    }
+    
+    // All 'ways' in the set are valid, evict one
+    ll evict_block = lru_l1[tid][set].back();
+    lru_l1[tid][set].pop_back();
+
+    for (int i=0;i<8;i++) 
+    {
+        if (l1[tid][set][i].address != evict_block) 
+        	continue;
+        
+        // Found the block to be evicted
+        l1[tid][set][i].address = address;
+        lru_l1[tid][set].push_front(address);
+        return evict_block;
+    }
+    abort(); 
+}
+
+//-----------------------INVALIDATE L1 CACHE BLK WHEN EVICTED BLK FROM L2 IN PRESENT IN L1;-------------------
+void invalidate_block_l1(ll address, int tid) 
+{
+	address = address>>6;
+    int set  =  address % 64;
+    for (int i=0;i<8;i++) 
+    {
+        if (l1[tid][set][i].address != address) 
+        	continue;
+        // Found the block; Invalidate it
+        l1[tid][set][i].present = false;
+        lru_l1[tid][set].remove(address);
+        return;
+    }
+    abort(); 
+}
+
 
 
 int main(int argc, char const *argv[])
@@ -297,24 +414,87 @@ int main(int argc, char const *argv[])
       		//cout<<l2_in_queue[7].front().tid<<endl;
       		//cout<<l2_in_queue[7].front().globalcount<<endl;
 
-
       		// process other queue of l1 (if not empty) && now process l2 input queue (if not empty) 
       		outentry ohterinput[8], l2input[8];
       		int k=0, size_otherinput=0,size_l2input=0;
+
+
       		while(k<8){
+
       			if (! l1_out_queue[k].empty()){
       				ohterinput[k] = l1_out_queue[k].front();
       				//size_otherinput++;
       				// do this later
       				l1_out_queue[k].pop_front();
       			}
+
       			if(! l2_in_queue[k].empty()){
+      				cout<<"here\n";
+
+
       				l2input[k] = l2_in_queue[k].front();
       				//size_l2input++;
       				//process this entry from l2 input queue and then remove it 
       				// check if dirty is set or not
-      				if (hit_miss_l2(l2input[k].machineadd, l2input[k].tid)){
-      					//dirty bit is set
+      				ll machineadd_ = l2input[k].machineadd;
+      				int tid_ = l2input[k].tid;
+      				ll globalcount_ = l2input[k].globalcount;
+      				int rw_ = l2input[k].rw;
+
+      				int d = hit_miss_l2(l2input[k].machineadd, k);cout<<"here 1-->\n"<<d;
+
+      				if ( d == 0){
+      					//dirty bit is notset
+      					if(l2input[k].rw == 0){
+      						//read
+      						//send put and set bit corresponding to k(means sharer) in bitvector
+      						set_sharer(k, l2input[k].machineadd, l2input[k].tid);
+      						//debug
+      						cout<<"here after sharer\n";
+
+      						outentry send;
+      						send.tid = l2input[k].tid;
+      						send.machineadd = l2input[k].machineadd;
+      						send.globalcount = l2input[k].globalcount;
+      						send.rw = l2input[k].rw;
+      						send.dir_msg = put;
+      						l1_out_queue[l2input[k].tid].push_back(send); //send msg from home bank to requester l1 cache.
+
+
+
+      					}else{
+      						//write
+      						//find sharer from bit vector and send them invalidation; make bitvector  = k;(owner) ;
+      						//1. read bitvector and send inv to all sharer
+      						
+      						outentry send;
+      						send.tid = tid_;
+      						send.machineadd = machineadd_;
+      						send.globalcount = globalcount_;
+      						send.rw = rw_;
+      						send.dir_msg = inv;
+
+      						bitset<8> temp = get_sharer(k, machineadd_);
+      						int inv_to_who = 0;
+
+      						while(inv_to_who < 8){
+      							if (temp.test(inv_to_who)){
+      								//send inv to inv_to_who
+      								l1_out_queue[inv_to_who].push_back(send); // **TODO also send how many acks to expect...?????
+      							}
+      							inv_to_who++;
+      						}
+
+      						//2. set bit vector to store k as owner
+
+
+      						//3. send putX to k
+
+
+
+      					}
+      				}else if(d == 1){
+      					//dirty bit is  set
       					if(l2input[k].rw == 0){
       						//read
       						// send get request to current owner and change bit vector--> make both k and owner sharers of blk;
@@ -323,26 +503,23 @@ int main(int argc, char const *argv[])
 
       					}else{
       						//write
-      						//send getx to current owner and set bitvector such that k is new owner;
-
-
-
-      					}
-      				}else{
-      					//dirty bit is not set
-      					if(l2input[k].rw == 0){
-      						//read
-      						//send put and set bit corresponding to k(means sharer) in bitvector
-
-
-      					}else{
-      						//write
       						//send putx with no. of acks to be expected;
-      						//find sharer from bit vector and send them invalidation; make bitvector  = k;(owner)
+      						//;send getx to current owner and set bitvector such that k is new owner;
 
 
 
       					}
+
+      				}else{
+      					// blk not present in l2 cache i.e. l2 cache miss.
+      					cout<<"l2 miss\n";
+      					l2_miss[k]++;
+      					ll evicted = add_block_l2(machineadd_, k);
+      					 if (evicted && hit_miss_l1(evicted, tid_)){
+            				invalidate_block_l1(evicted, tid_);
+            			}
+             				add_block_l1(machineadd_, tid_);
+             				cout<<"reached here\n";
 
       				}
 
