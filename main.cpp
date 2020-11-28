@@ -5,13 +5,18 @@
 typedef long long int ll;
 using namespace std;
 
-//status M =0, E=1, S=2, I is captured through present
+
+enum status
+{
+	S=10,M,E,I
+
+};
 struct block
 {
 	bool present;
 	ll address;
 	bool modified;
-	//int status;
+	enum status status_;
 };
 
 struct qentry
@@ -25,7 +30,7 @@ struct qentry
 
 enum msg
 {
-	getX,getmsg,putX,put,inv,invack,swb,ack_getx
+	getX,getmsg,putX,put,inv,invack,swb,ack_getx,upgrd
 	
 };
 struct outentry
@@ -44,11 +49,12 @@ struct dir_entry
 	bool present;
 	ll address;
 	bitset<8> sharer;
+	enum status status_; // only possible status are M, I, S //can't differentiate b/w M and E;
 };
 
 //32 KB, 8-way, 64-byte block size, LRU
 
-vector<vector<vector<block>>> l1(8,vector<vector<block>>(64, vector<block>(8,{false,-1,false})));
+vector<vector<vector<block>>> l1(8,vector<vector<block>>(64, vector<block>(8,{false,-1,false,I})));
 
 //4 MB, 16-way, 64-byte block size, LRU,
 
@@ -70,11 +76,9 @@ ll sim_cycle, l1_access[8], l1_miss[8], l2_miss[8], global_consumed=-1;
 vector<list<qentry>> l1_in_queue(8);
 
 
- // other input queue for l1 caches
+// other input queue for l1 caches
 std::vector<list<outentry>> l1_out_queue(8);
 
-//output queue for l2 caches
-//std::vector<list<outentry>> l2_out_queue(8);
 
 //input queue for l2 caches
 std::vector<list<outentry>> l2_in_queue(8);
@@ -83,7 +87,52 @@ std::vector<list<outentry>> l2_in_queue(8);
 std::vector<list<outentry>> miss_buff_l1(8);
 
 bool compareInterval(qentry i1, qentry i2){
-	return(i1.tid < i2.tid);
+	return(i1.globalcount < i2.globalcount);
+}
+//--------------------SET L2 STATUS------------------------------------
+void set_l2_status(ll address, int tid, status set_this){
+	address = address >>6;
+    int set  =  address % 2048;
+    for (int i=0;i<16;i++) 
+    {
+        if((l2[tid][set][i].address == address) && (l2[tid][set][i].present))
+            l2[tid][set][i].status_ = set_this;
+    }
+    
+}
+//--------------------SET L1 STATUS------------------------------------
+void set_l2_status(ll address, int tid, status set_this){
+	address = address >>6;
+    int set  =  address % 64;
+    for (int i=0;i<8;i++) 
+    {
+        if((l1[tid][set][i].address == address) && (l1[tid][set][i].present))
+            l1[tid][set][i].status_ = set_this;
+    }
+    
+}
+//--------------------READ L2 STATUS-----------------------------------
+status read_l2_status(ll address, int tid){
+	address = address >>6;
+    int set  =  address % 2048;
+    for (int i=0;i<16;i++) 
+    {
+        if((l2[tid][set][i].address == address) && (l2[tid][set][i].present))
+            return l2[tid][set][i].status_;
+    }
+    return I;
+}
+
+//-------------------READ L1 STATUS------------------------------------
+status read_l1_status(ll address, int tid){
+	address = address >>6;
+    int set  =  address % 64;
+    for (int i=0;i<8;i++) 
+    {
+        if((l1[tid][set][i].address == address) && (l1[tid][set][i].present))
+            return l1[tid][set][i].status_;
+    }
+    return I;
 }
 //--------------------BITVECOTR TO INT------------------------------------
 int btoi(bitset<8>bv){
@@ -206,43 +255,49 @@ void set_owner(int k, ll address, int tid){
 //---------------------CURRENT CYCLE FUNCTION FOR L1--------------
 
 void current_cycle(ll machineadd, ll globalcount, int tid, int read_write){
+						outentry send;
+      					send.tid = tid;
+      					send.machineadd = machineadd;
+      					send.globalcount = globalcount;
+      					send.rw = read_write;
 
-
+      					ll bid = find_bank(machineadd);
 	if(! hit_miss_l1(machineadd, tid)){ // if miss in l1 cache.
       					l1_miss[tid]++;
-      					ll bid = find_bank(machineadd);
-
+      					
+      					
       					//cout<<bid<<"<--bank id \n";
       					//put this request in respective l2 cache bank queue according to read write pass message.
       					//cout<<this_cycle[j].read_write<<"read write\n";
       					if(read_write == 0){
       						// this means its a read miss --> send a get request to respective home l2 cache;
       						//cout<<"read\n";
-      						outentry send;
-      						send.tid = tid;
-      						send.machineadd = machineadd;
-      						send.globalcount = globalcount;
       						send.dir_msg  = getmsg;
-      						send.rw = read_write;
       						l2_in_queue[bid].push_back(send);
 
       					}else{
       						//this is a write miss -> send a getx to ...
-      						outentry send;
-      						send.tid = tid;
-      						send.machineadd = machineadd;
-      						send.globalcount = globalcount;
+      						
       						send.dir_msg  = getX;
-      						send.rw = read_write;
+      						
       						l2_in_queue[bid].push_back(send);
 
       					}
 
       				}else{
       					//if hit in l1 cache;
-      					//1. update l1 lru
-      					update_on_hit(machineadd, tid);
+      					
 
+      					status l1_status = read_l1_status(machineadd, tid);
+      					//if (S  )and write --> upgrade; rest all cases update lru status // read_write = 0 -> read // read_write =1 -> write
+      					if(l1_status == S && read_write == 1){
+      						send.dir_msg = upgrd;
+      						l2_in_queue[bid].push_back(send);
+      					}else{
+      						update_on_hit(machineadd, tid); // update lru status.
+      					}
+
+      					
       				}
 
 
@@ -338,7 +393,7 @@ void invalidate_block_l1(ll address, int tid)
 
 int main(int argc, char const *argv[])
 {
-	int termi =1000000;
+	int termi =100;
 	FILE *fp;
 	int tid,rw;
 	ll machine_add,gc;
@@ -424,7 +479,7 @@ int main(int argc, char const *argv[])
       		}
 
       		int j=0;
-      		while(i1>0){		// not terminating loop, update value of i and j;
+      		while(i1>0){
       			//cout<<"inside loop 2\n";	
       			int tid;
       			tid = this_cycle[j].tid;
@@ -542,37 +597,61 @@ int main(int argc, char const *argv[])
       				ll globalcount_ = l2input[k].globalcount;
       				int rw_ = l2input[k].rw;
 
-      				int d = hit_miss_l2(l2input[k].machineadd, k);//cout<<"here 1-->\n"<<"dirty bit value "<<d<<endl;
+      				status l2_status = read_l2_status(machineadd_, tid_);
+      				msg l2_msg = l2input[k].dir_msg;
 
-      				if ( d == 0){
-      					//dirty bit is notset
-      					if(l2input[k].rw == 0){
-      						//read
+      				//int d = hit_miss_l2(l2input[k].machineadd, k);//cout<<"here 1-->\n"<<"dirty bit value "<<d<<endl;
+      				outentry send;
+      				send.tid = tid_;
+      				send.machineadd = machineadd_;
+      				send.globalcount =globalcount_;
+      				send.rw = rw_;
+
+      				//1. if msg is get then 3 cases for each status M S I 
+      				if(l2_msg == getmsg){
+      					if(l2_status == M){
+      						bitset<8> curr_owner_bit = get_sharer(k, machineadd_);
+      						int curr_owner = btoi(curr_owner_bit);
+      						send.dir_msg = getmsg;
+      						//1. forwarded get msg to current owner
+      						l1_out_queue[curr_owner].push_back(send);
+
+      						//2.set dirty bit to zero and set bitvector to store k and curr_owner as sharer;
+      						set_dirty_zero(machineadd_, k);
+      						set_l2_status(machineadd_, tid_, S); // updating status from M to S;
+      						set_sharer(k, machineadd_, tid_);
+      						set_sharer(k, machineadd_, curr_owner);
+
+
+      					}else if(l2_status == S){
       						//send put and set bit corresponding to k(means sharer) in bitvector
-      						set_sharer(k, l2input[k].machineadd, l2input[k].tid);
-      						//debug
-      						cout<<"here after sharer\n";
-
-      						outentry send;
-      						send.tid = l2input[k].tid;
-      						send.machineadd = l2input[k].machineadd;
-      						send.globalcount = l2input[k].globalcount;
-      						send.rw = l2input[k].rw;
+      						set_sharer(k, machineadd_, tid_);
       						send.dir_msg = put;
-      						l1_out_queue[l2input[k].tid].push_back(send); //send msg from home bank to requester l1 cache.
+      						l1_out_queue[tid_].push_back(send); //send msg from home bank to requester l1 cache.
 
+      					}else if(l2_status == I){
+      						set_sharer(k, machineadd_, tid_);
 
+      						send.dir_msg = put;
+      						set_l2_status(machineadd_, tid_, S); // updating status from I to S;
+      						l1_out_queue[tid_].push_back(send); 
 
-      					}else{
-      						//write
-      						//find sharer from bit vector and send them invalidation; make bitvector  = k;(owner) ;
-      						//1. read bitvector and send inv to all sharer
-      						
-      						outentry send;
-      						send.tid = tid_;
-      						send.machineadd = machineadd_;
-      						send.globalcount = globalcount_;
-      						send.rw = rw_;
+      					}
+
+      				}
+      				if(l2_msg == getX){
+      					if(l2_status == M){
+      						//1. check owner and send him getX
+      						bitset<8> curr_owner_bit = get_sharer(k, machineadd_);
+      						int curr_owner = btoi(curr_owner_bit);
+      						send.dir_msg = getX;
+
+      						l1_out_queue[curr_owner].push_back(send);
+
+      						//2. set tid_ as new owner 
+      						set_owner(k,machineadd_,tid_);
+
+      					}else if(l2_status == S){
       						send.dir_msg = inv;
 
       						bitset<8> temp = get_sharer(k, machineadd_);
@@ -596,61 +675,28 @@ int main(int argc, char const *argv[])
       						send.how_many_ack = count_inv;
 
       						l1_out_queue[tid_].push_back(send);
+      						set_l2_status(machineadd_, tid_, M); // updating status from S to M;
 
-      					}
-      				}else if(d == 1){
-      					//dirty bit is  set
-      					if(l2input[k].rw == 0){
-      						//read
-      						// send get request to current owner and change bit vector--> make both k and owner sharers of blk;
-      						//1.forward get request to current owner 
-      						bitset<8> curr_owner_bit = get_sharer(k, machineadd_);
-      						int curr_owner = btoi(curr_owner_bit);
-      						outentry send;
-      						send.tid = tid_;
-      						send.machineadd = machineadd_;
-      						send.globalcount =globalcount_;
-      						send.rw = rw_;
-      						send.dir_msg = getmsg;					//** TODO not implemented pending state.
-
-      						l1_out_queue[curr_owner].push_back(send);
-
-      						//2.set dirty bit to zero and set bitvector to store k and curr_owner as sharer;
-      						set_dirty_zero(machineadd_, k);
-      						set_sharer(k, machineadd_, tid_);
-      						set_sharer(k, machineadd_, curr_owner);
-
-      					}else{
-      						//write
-      						//;send getx to current owner and set bitvector such that k is new owner;
-      						bitset<8> curr_owner_bit = get_sharer(k, machineadd_);
-      						int curr_owner = btoi(curr_owner_bit);
-      						outentry send;
-      						send.tid = tid_;
-      						send.machineadd = machineadd_;
-      						send.globalcount =globalcount_;
-      						send.rw = rw_;
-      						send.dir_msg = getX;
-
-      						l1_out_queue[curr_owner].push_back(send);
-
-      						//2. set tid_ as new owner 
+      					}else if(l2_status == I){
       						set_owner(k,machineadd_,tid_);
-
+      						send.dir_msg = putX;
+      						set_l2_status(machineadd_, tid_, M); // updating status from I to M;
+      						l1_out_queue[tid_].push_back(send); 	
       					}
-
-      				}else{
-      					// blk not present in l2 cache i.e. l2 cache miss.
-      					//cout<<"l2 miss\n";
-      					l2_miss[k]++;
-      					ll evicted = add_block_l2(machineadd_, k);
-      					 if (evicted && hit_miss_l1(evicted, tid_)){
-            				invalidate_block_l1(evicted, tid_);
-            			}
-             				add_block_l1(machineadd_, tid_);
-             				//cout<<"reached here\n";
 
       				}
+      				if(l2_msg == upgrd){
+      					if(l2_status == M){
+      						
+
+
+      					}else if(l2_status == S){
+
+      					}
+
+      				}
+
+
 
       				l2_in_queue[k].pop_front();
       			}
